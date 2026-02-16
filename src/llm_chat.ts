@@ -1044,6 +1044,21 @@ export class LLMChatPipeline {
       wBar = Math.max(factor, Math.ceil((width * beta) / factor) * factor);
     }
 
+    // Guardrail for WebLLM runtimes compiled with smaller prefill chunk sizes.
+    // GLM-OCR image embeddings cannot be chunked, so keep estimated embed tokens
+    // <= prefillChunkSize by capping resized area.
+    const maxAreaByChunk =
+      this.prefillChunkSize *
+      this.visionPatchSize *
+      this.visionPatchSize *
+      this.visionMergeSize *
+      this.visionMergeSize;
+    if (hBar * wBar > maxAreaByChunk) {
+      const beta = Math.sqrt((hBar * wBar) / maxAreaByChunk);
+      hBar = Math.max(factor, Math.floor(hBar / beta / factor) * factor);
+      wBar = Math.max(factor, Math.floor(wBar / beta / factor) * factor);
+    }
+
     return [hBar, wBar];
   }
 
