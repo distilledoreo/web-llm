@@ -283,6 +283,7 @@ export function getModelIdToUse(
 export function getChunkedPrefillInputData(
   inputData: Array<Array<number> | ImageURL>,
   prefillChunkSize: number,
+  imageEmbedSize: number = IMAGE_EMBED_SIZE,
 ): [Array<Array<number> | ImageURL>[], Array<number>] {
   const chunks: Array<Array<number> | ImageURL>[] = [];
   const chunkLens: Array<number> = [];
@@ -290,9 +291,7 @@ export function getChunkedPrefillInputData(
   let curChunkLen = 0;
   for (let i = 0; i < inputData.length; i++) {
     let curData: Array<number> | ImageURL = inputData[i];
-    const curDataLen = Array.isArray(curData)
-      ? curData.length
-      : IMAGE_EMBED_SIZE;
+    const curDataLen = Array.isArray(curData) ? curData.length : imageEmbedSize;
     // 1. curData can fit into this chunk
     if (curChunkLen + curDataLen <= prefillChunkSize) {
       curChunk.push(curData);
@@ -338,7 +337,7 @@ export function getChunkedPrefillInputData(
       chunkLens.push(curChunkLen);
       // 2.2.2. Then push image to the new chunk
       curChunk = [curData];
-      curChunkLen = IMAGE_EMBED_SIZE;
+      curChunkLen = imageEmbedSize;
       if (curChunkLen === prefillChunkSize) {
         chunks.push([...curChunk]);
         chunkLens.push(curChunkLen);

@@ -74,6 +74,7 @@ export class LLMChatPipeline {
   private slidingWindowSize = -1;
   private attentionSinkSize = -1;
   private prefillChunkSize = -1;
+  private currentImageEmbedSize = IMAGE_EMBED_SIZE;
   private resetStatsPerPrefill = true;
   private stopStr: string[];
   private stopTokens: Array<number>;
@@ -251,6 +252,17 @@ export class LLMChatPipeline {
     log.info("Using prefillChunkSize: ", this.prefillChunkSize);
     if (this.prefillChunkSize <= 0) {
       throw new MinValueError("prefill_chunk_size", 0);
+    }
+    if (
+      metadata.image_embed_size !== undefined &&
+      metadata.image_embed_size !== null &&
+      Number(metadata.image_embed_size) > 0
+    ) {
+      this.currentImageEmbedSize = Number(metadata.image_embed_size);
+      log.info(
+        "Using imageEmbedSize from metadata: ",
+        this.currentImageEmbedSize,
+      );
     }
 
     // 5. Consolidate KVCache settings: context window, sliding window, attention sink
@@ -700,7 +712,7 @@ export class LLMChatPipeline {
     }
     const retGetInputData = this.getInputData();
     const inputData: Array<Array<number> | ImageURL> = retGetInputData[0];
-    const promptLen: number = retGetInputData[1];
+    let promptLen: number = retGetInputData[1];
 
     // Check if LLMChatPipeline fits for forwarding image input
     let hasImageInput = false;
@@ -709,38 +721,81 @@ export class LLMChatPipeline {
         hasImageInput = true;
       }
     });
-    if (hasImageInput && this.prefillChunkSize < IMAGE_EMBED_SIZE) {
-      throw new PrefillChunkSizeSmallerThanImageError(
-        this.prefillChunkSize,
-        IMAGE_EMBED_SIZE,
-      );
-    }
     if (hasImageInput && this.image_embed === undefined) {
       throw new CannotFindImageEmbedError();
     }
 
-    // 1. Chunk inputData to embed and forward in one shot for each, minimize intermediate data
-    const retGetChunks = getChunkedPrefillInputData(
-      inputData,
-      this.prefillChunkSize,
-    );
-    const chunks: Array<Array<number> | ImageURL>[] = retGetChunks[0];
-    const chunkLens: Array<number> = retGetChunks[1];
-
-    // 2. Prefill each chunk
+    // 1. Prefill with adaptive image length handling.
     this.tvm.beginScope();
-    let logits: tvmjs.Tensor;
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const chunkLen = chunkLens[i];
-      const prevFilledLen = this.filledKVCacheLength;
-      logits = this.tvm.detachFromCurrentScope(
-        await this.embedAndForward(chunk, chunkLen),
-      );
-      if (this.filledKVCacheLength !== prevFilledLen + chunkLen) {
-        throw new Error(
-          "Internal Error: filledKVCacheLength does not match expected value.",
+    let logits: tvmjs.Tensor | undefined;
+    let actualPromptLen = 0;
+    if (hasImageInput) {
+      for (let i = 0; i < inputData.length; i++) {
+        const data = inputData[i];
+        if (Array.isArray(data)) {
+          // Token-only chunks can be pre-chunked exactly.
+          const [tokenChunks, tokenChunkLens] = getChunkedPrefillInputData(
+            [data],
+            this.prefillChunkSize,
+            this.currentImageEmbedSize,
+          );
+          for (let j = 0; j < tokenChunks.length; j++) {
+            const chunk = tokenChunks[j];
+            const chunkLen = tokenChunkLens[j];
+            const prevFilledLen = this.filledKVCacheLength;
+            logits = this.tvm.detachFromCurrentScope(
+              await this.embedAndForward(chunk, chunkLen),
+            );
+            if (this.filledKVCacheLength !== prevFilledLen + chunkLen) {
+              throw new Error(
+                "Internal Error: filledKVCacheLength does not match expected value.",
+              );
+            }
+            actualPromptLen += chunkLen;
+          }
+          continue;
+        }
+
+        // Probe once to obtain exact embedding length for current image.
+        const probeEmbed = await this.getImageEmbeddings(data);
+        const imageEmbedLen = Number(probeEmbed.shape[0]);
+        probeEmbed.dispose();
+        if (this.prefillChunkSize < imageEmbedLen) {
+          throw new PrefillChunkSizeSmallerThanImageError(
+            this.prefillChunkSize,
+            imageEmbedLen,
+          );
+        }
+        const prevFilledLen = this.filledKVCacheLength;
+        logits = this.tvm.detachFromCurrentScope(
+          await this.embedAndForward([data], imageEmbedLen),
         );
+        if (this.filledKVCacheLength !== prevFilledLen + imageEmbedLen) {
+          throw new Error(
+            "Internal Error: filledKVCacheLength does not match expected value.",
+          );
+        }
+        actualPromptLen += imageEmbedLen;
+      }
+      promptLen = actualPromptLen;
+    } else {
+      const [chunks, chunkLens] = getChunkedPrefillInputData(
+        inputData,
+        this.prefillChunkSize,
+        this.currentImageEmbedSize,
+      );
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const chunkLen = chunkLens[i];
+        const prevFilledLen = this.filledKVCacheLength;
+        logits = this.tvm.detachFromCurrentScope(
+          await this.embedAndForward(chunk, chunkLen),
+        );
+        if (this.filledKVCacheLength !== prevFilledLen + chunkLen) {
+          throw new Error(
+            "Internal Error: filledKVCacheLength does not match expected value.",
+          );
+        }
       }
     }
     this.tvm.endScope();
@@ -1018,12 +1073,12 @@ export class LLMChatPipeline {
         this.params,
       ),
     );
-    if (embed.shape[0] !== IMAGE_EMBED_SIZE) {
+    if (embed.shape[0] <= 0) {
       throw new Error(
-        `InternalError: expect embed.shape[0] to be ${IMAGE_EMBED_SIZE}, ` +
-          `but got ${embed.shape[0]}`,
+        `InternalError: expected positive image embedding length, got ${embed.shape[0]}`,
       );
     }
+    this.currentImageEmbedSize = Number(embed.shape[0]);
     this.tvm.endScope();
     this.tvm.attachToCurrentScope(embed); // tracked by scope of embedAndForward
     return embed;
@@ -1566,7 +1621,7 @@ export class LLMChatPipeline {
             // push curTokens to ret, push imageUrl, create a new curTokens
             ret.push([...curTokens]);
             ret.push(curPromptContent);
-            numPromptTokens += IMAGE_EMBED_SIZE;
+            numPromptTokens += this.currentImageEmbedSize;
             curTokens = [];
           }
         }
