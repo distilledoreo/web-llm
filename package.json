@@ -10,8 +10,7 @@
     "lint": "npx eslint ./src/ ./tests/ ./examples/ && npx prettier ./src/ ./tests/ ./examples/ --check",
     "test": "jest --coverage",
     "format": "prettier --write \"./src/\" \"./examples/\" \"./tests/\"",
-    "prepare": "npm run build",
-    "setup_hooks": "husky"
+    "prepare": "husky"
   },
   "files": [
     "lib"
