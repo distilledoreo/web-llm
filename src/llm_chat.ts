@@ -75,6 +75,10 @@ export class LLMChatPipeline {
   private attentionSinkSize = -1;
   private prefillChunkSize = -1;
   private currentImageEmbedSize = IMAGE_EMBED_SIZE;
+  private modelType = "";
+  private visionPatchSize = 14;
+  private visionTemporalPatchSize = 2;
+  private visionMergeSize = 2;
   private resetStatsPerPrefill = true;
   private stopStr: string[];
   private stopTokens: Array<number>;
@@ -237,6 +241,18 @@ export class LLMChatPipeline {
     const ret_value = fgetMetadata();
     const metadataStr = ret_value.toString();
     const metadata = JSON.parse(metadataStr);
+    this.modelType = String(
+      metadata.model_type ?? (this.config as any).model_type ?? "",
+    ).toLowerCase();
+    const visionConfig: Record<string, unknown> =
+      (metadata.model_config?.vision_config ??
+        (this.config as any).model_config?.vision_config ??
+        {}) as Record<string, unknown>;
+    this.visionPatchSize = Number(visionConfig.patch_size ?? 14);
+    this.visionTemporalPatchSize = Number(
+      visionConfig.temporal_patch_size ?? 2,
+    );
+    this.visionMergeSize = Number(visionConfig.spatial_merge_size ?? 2);
 
     // 3. Load parameters by name
     const paramNames: string[] = [];
@@ -994,14 +1010,54 @@ export class LLMChatPipeline {
     return embed;
   }
 
+  private calculateGlm46VResizeShape(
+    imageHeight: number,
+    imageWidth: number,
+  ): [number, number] {
+    // Mirrors transformers Glm46VImageProcessor.smart_resize.
+    const temporalFactor = Math.max(1, this.visionTemporalPatchSize);
+    const factor = Math.max(1, this.visionPatchSize * this.visionMergeSize);
+    const minPixels = 12544; // from GLM-OCR preprocessor_config.json shortest_edge
+    const maxPixels = 9633792; // from GLM-OCR preprocessor_config.json longest_edge
+    const numFrames = temporalFactor;
+
+    let height = imageHeight;
+    let width = imageWidth;
+    if (height < factor || width < factor) {
+      const scale = Math.max(factor / height, factor / width);
+      height = Math.max(factor, Math.round(height * scale));
+      width = Math.max(factor, Math.round(width * scale));
+    }
+
+    let hBar = Math.max(factor, Math.round(height / factor) * factor);
+    let wBar = Math.max(factor, Math.round(width / factor) * factor);
+    const tBar =
+      Math.max(1, Math.round(numFrames / temporalFactor)) * temporalFactor;
+
+    if (tBar * hBar * wBar > maxPixels) {
+      const beta = Math.sqrt((numFrames * height * width) / maxPixels);
+      hBar = Math.max(factor, Math.floor(height / beta / factor) * factor);
+      wBar = Math.max(factor, Math.floor(width / beta / factor) * factor);
+    } else if (tBar * hBar * wBar < minPixels) {
+      const beta = Math.sqrt(minPixels / (numFrames * height * width));
+      hBar = Math.max(factor, Math.ceil((height * beta) / factor) * factor);
+      wBar = Math.max(factor, Math.ceil((width * beta) / factor) * factor);
+    }
+
+    return [hBar, wBar];
+  }
+
   /**
-   * Calculate resize dimensions for Phi3-V model.
-   * Based on vlm_utils.cc CalculateResizeShape
+   * Calculate resize dimensions for image models.
+   * Uses GLM-OCR smart-resize for glm_ocr, and phi3-v hd transform otherwise.
    */
   private calculateResizeShape(
     imageHeight: number,
     imageWidth: number,
   ): [number, number] {
+    if (this.modelType === "glm_ocr") {
+      return this.calculateGlm46VResizeShape(imageHeight, imageWidth);
+    }
     const hdNum = 16;
     const ratio = imageWidth / imageHeight;
     let scale = 1;
@@ -1022,6 +1078,9 @@ export class LLMChatPipeline {
     imageHeight: number,
     imageWidth: number,
   ): [number, number] {
+    if (this.modelType === "glm_ocr") {
+      return [1, 1];
+    }
     const [resizedHeight, resizedWidth] = this.calculateResizeShape(
       imageHeight,
       imageWidth,

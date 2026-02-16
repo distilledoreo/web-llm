@@ -36,6 +36,10 @@ export declare class LLMChatPipeline {
     private attentionSinkSize;
     private prefillChunkSize;
     private currentImageEmbedSize;
+    private modelType;
+    private visionPatchSize;
+    private visionTemporalPatchSize;
+    private visionMergeSize;
     private resetStatsPerPrefill;
     private stopStr;
     private stopTokens;
@@ -183,9 +187,10 @@ export declare class LLMChatPipeline {
      * chunking in `getChunkedPrefillInputData()`.
      */
     private getTokensEmbeddings;
+    private calculateGlm46VResizeShape;
     /**
-     * Calculate resize dimensions for Phi3-V model.
-     * Based on vlm_utils.cc CalculateResizeShape
+     * Calculate resize dimensions for image models.
+     * Uses GLM-OCR smart-resize for glm_ocr, and phi3-v hd transform otherwise.
      */
     private calculateResizeShape;
     /**
